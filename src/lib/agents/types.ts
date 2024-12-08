@@ -7,9 +7,15 @@ export enum ChatMode {
 }
 
 export interface Message {
-  role: 'system' | 'user' | 'assistant' | 'tool';
+  role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
-  mode?: ChatMode;
+  tool_call_id?: string;
+}
+
+export interface StructuredOutputFormat {
+  type: 'object';
+  properties: Record<string, any>;
+  required?: string[];
 }
 
 export interface Agent {
@@ -19,10 +25,6 @@ export interface Agent {
   tools: Tool[];
   model: string;
   supportedModes: ChatMode[];
-}
-
-export interface StructuredOutputFormat {
-  type: 'object';
-  properties: Record<string, any>;
-  required?: string[];
+  structuredOutputFormat?: StructuredOutputFormat;
+  chat(messages: Message[]): Promise<string>;
 }

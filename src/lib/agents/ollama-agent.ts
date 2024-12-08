@@ -1,174 +1,99 @@
-import { Tool } from "../tools/tool";
-import { ChatMode, Message, StructuredOutputFormat } from "./types";
+import { Agent, ChatMode, Message, StructuredOutputFormat } from './types';
+import { Tool } from '../tools/tool';
 
-interface FunctionCall {
-  name: string;
-  arguments: string;
-}
-
-interface FunctionCallResponse {
-  name: string;
-  content: string;
-}
-
-interface OllamaResponseFormat {
-  type: "json_object";
-}
-
-interface OllamaResponse {
-  model: string;
-  created_at: string;
-  message?: {
-    role: string;
-    content: string;
-    images?: string[];
-    function_call?: FunctionCall;
-  };
-  done: boolean;
-  total_duration?: number;
-  load_duration?: number;
-  prompt_eval_count?: number;
-  prompt_eval_duration?: number;
-  eval_count?: number;
-  eval_duration?: number;
-  function_call_response?: FunctionCallResponse;
-}
-
-interface OllamaRequest {
-  model: string;
-  messages: Message[];
-  stream: boolean;
-  format?: "json";
-  options?: Record<string, unknown>;
-  template?: string;
-  context?: unknown;
-  response_format?: OllamaResponseFormat;
-  tools?: Tool[];
-}
+const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
 
 export interface OllamaAgentOptions {
   model: string;
   tools?: Tool[];
-  supportedModes?: ChatMode[];
+  structuredOutputFormat?: StructuredOutputFormat;
+  baseUrl?: string;
 }
 
-export class OllamaAgent {
-  private model: string;
-  private tools: Tool[];
-  private supportedModes: ChatMode[];
-  private currentMode: ChatMode = ChatMode.NORMAL;
+export class OllamaAgent implements Agent {
+  id: string;
+  name: string;
+  description: string;
+  model: string;
+  tools: Tool[];
+  supportedModes: ChatMode[];
+  structuredOutputFormat?: StructuredOutputFormat;
+  private baseUrl: string;
 
   constructor(options: OllamaAgentOptions) {
+    this.id = `ollama-${options.model}`;
+    this.name = `Ollama ${options.model}`;
+    this.description = `An agent powered by the ${options.model} model`;
     this.model = options.model;
     this.tools = options.tools || [];
-    this.supportedModes = options.supportedModes || [ChatMode.NORMAL];
+    this.supportedModes = [ChatMode.NORMAL, ChatMode.STRUCTURED, ChatMode.TOOL_BASED];
+    this.structuredOutputFormat = options.structuredOutputFormat;
+    
+    // Use provided baseUrl, environment variable, or default
+    const envUrl = typeof window !== 'undefined' ? window.__NEXT_DATA__?.props?.env?.OLLAMA_URL : process.env.OLLAMA_URL;
+    this.baseUrl = options.baseUrl || envUrl || DEFAULT_OLLAMA_URL;
   }
 
-  setMode(mode: ChatMode) {
-    if (!this.supportedModes.includes(mode)) {
-      throw new Error(`Mode ${mode} is not supported by this agent`);
-    }
-    this.currentMode = mode;
-  }
-
-  async chat(messages: Message[], format?: StructuredOutputFormat): Promise<string> {
-    const requestBody: OllamaRequest = {
+  async chat(messages: Message[]): Promise<string> {
+    const payload: any = {
       model: this.model,
-      messages,
+      messages: messages,
       stream: false,
-      format: "json",
-      options: {
-        num_predict: 4096,
-        stop: ["\n\n"],
-        temperature: 0.7,
-      },
     };
 
-    // Add mode-specific configurations
-    switch (this.currentMode) {
-      case ChatMode.STRUCTURED:
-        if (!format) {
-          throw new Error('Structured output format is required for structured mode');
+    // Add tools if available
+    if (this.tools.length > 0) {
+      payload.tools = this.tools.map(tool => ({
+        type: 'function',
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters
         }
-        requestBody.response_format = {
-          type: "json_object"
-        };
-        requestBody.format = "json";
-        break;
+      }));
+    }
 
-      case ChatMode.TOOL_BASED:
-        requestBody.tools = this.tools;
-        break;
-
-      case ChatMode.NORMAL:
-        // No special configuration needed
-        break;
+    // Add structured output format if available
+    if (this.structuredOutputFormat) {
+      payload.format = this.structuredOutputFormat;
     }
 
     try {
-      const response = await fetch('/api/ollama/chat', {
+      const response = await fetch(`${this.baseUrl}/api/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(requestBody),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
-        throw new Error(`Ollama API request failed with status ${response.status}`);
+        throw new Error(`Failed to chat with Ollama: ${response.statusText}`);
       }
 
-      const data: OllamaResponse = await response.json();
+      const data = await response.json();
       
-      if (!data.message) {
-        throw new Error('No message in response');
-      }
-
-      if (!data.message.content && !data.message.function_call) {
-        throw new Error('No content or function call in response');
-      }
-
-      switch (this.currentMode) {
-        case ChatMode.STRUCTURED:
-          return data.message.content;
-
-        case ChatMode.TOOL_BASED:
-          if (data.message.function_call) {
-            const { name, arguments: argsString } = data.message.function_call;
-            const tool = this.tools.find(t => t.name === name);
-            if (tool) {
-              try {
-                const args = JSON.parse(argsString);
-                const result = await tool.execute(args);
-                return result;
-              } catch (error) {
-                console.error('Error executing tool:', error);
-                return `Error executing tool ${name}: ${error instanceof Error ? error.message : 'Unknown error'}`;
-              }
-            }
-            return `Tool ${name} not found`;
+      // Handle tool calls if present
+      if (data.message?.tool_calls) {
+        for (const toolCall of data.message.tool_calls) {
+          const tool = this.tools.find(t => t.name === toolCall.function.name);
+          if (tool) {
+            const result = await tool.execute(toolCall.function.arguments);
+            messages.push({
+              role: 'tool',
+              content: result,
+              tool_call_id: toolCall.id
+            });
           }
-          return data.message.content;
-
-        case ChatMode.NORMAL:
-        default:
-          return data.message.content;
+        }
+        // Make another request with tool results
+        return this.chat(messages);
       }
+
+      return data.message.content;
     } catch (error) {
-      console.error('Error during Ollama chat:', error);
+      console.error('Error in Ollama chat:', error);
       throw error;
     }
-  }
-
-  getTools(): Tool[] {
-    return this.tools;
-  }
-
-  getSupportedModes(): ChatMode[] {
-    return this.supportedModes;
-  }
-
-  getCurrentMode(): ChatMode {
-    return this.currentMode;
   }
 }

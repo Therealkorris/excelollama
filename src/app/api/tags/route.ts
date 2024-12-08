@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
+
 interface Tag {
   name: string;
   size: number;
@@ -13,11 +15,9 @@ interface TagsResponse {
 
 export async function GET(req: NextRequest) {
   try {
-    if (!process.env.OLLAMA_URL) {
-      throw new Error('OLLAMA_URL environment variable is not set');
-    }
+    const baseUrl = process.env.OLLAMA_URL || DEFAULT_OLLAMA_URL;
 
-    const response = await fetch(`${process.env.OLLAMA_URL}/api/tags`, {
+    const response = await fetch(`${baseUrl}/api/tags`, {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',

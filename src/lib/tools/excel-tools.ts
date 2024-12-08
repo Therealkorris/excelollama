@@ -3,49 +3,37 @@ import * as XLSX from 'xlsx';
 import path from 'path';
 
 interface ExcelRow {
-  [key: string]: string | number | boolean | null;
-}
-
-interface Summary {
-  count: number;
-  uniqueValues: number;
-  hasNulls: boolean;
-}
-
-interface AggregateResult {
-  [key: string]: number;
+  [key: string]: any;
 }
 
 export const readExcelTool: Tool = {
   name: 'read_excel',
-  description: 'Read data from an Excel or CSV file',
+  description: 'Read data from an Excel file',
   parameters: {
     type: 'object',
     properties: {
       filePath: {
         type: 'string',
-        description: 'Path to the Excel or CSV file relative to the workspace',
+        description: 'Path to the Excel file'
       },
       sheet: {
         type: 'string',
-        description: 'Sheet name (optional, defaults to first sheet)',
-      },
+        description: 'Sheet name (optional)'
+      }
     },
-    required: ['filePath'],
+    required: ['filePath']
   },
   execute: async (args: Record<string, any>) => {
     try {
-      const filePath = path.join(process.cwd(), 'public', 'uploads', args.filePath);
-      const workbook = XLSX.readFile(filePath);
+      const workbook = XLSX.readFile(args.filePath);
       const sheetName = args.sheet || workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
-      const data = XLSX.utils.sheet_to_json<ExcelRow>(worksheet);
+      const data = XLSX.utils.sheet_to_json(worksheet);
       return JSON.stringify(data);
     } catch (error) {
-      console.error('Error reading Excel file:', error);
-      throw new Error(`Failed to read Excel file: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return `Error reading Excel file: ${error instanceof Error ? error.message : 'Unknown error'}`;
     }
-  },
+  }
 };
 
 export const writeExcelTool: Tool = {
@@ -56,122 +44,104 @@ export const writeExcelTool: Tool = {
     properties: {
       filePath: {
         type: 'string',
-        description: 'Path where to save the Excel file relative to the workspace',
+        description: 'Path to save the Excel file'
       },
       data: {
-        type: 'string',
-        description: 'JSON string of data to write to Excel',
+        type: 'array',
+        items: {
+          type: 'object'
+        },
+        description: 'Array of objects to write to Excel'
       },
       sheet: {
         type: 'string',
-        description: 'Sheet name (optional, defaults to "Sheet1")',
-      },
+        description: 'Sheet name (optional)'
+      }
     },
-    required: ['filePath', 'data'],
+    required: ['filePath', 'data']
   },
   execute: async (args: Record<string, any>) => {
     try {
-      const data = JSON.parse(args.data) as ExcelRow[];
+      const worksheet = XLSX.utils.json_to_sheet(args.data);
       const workbook = XLSX.utils.book_new();
-      const worksheet = XLSX.utils.json_to_sheet(data);
       XLSX.utils.book_append_sheet(workbook, worksheet, args.sheet || 'Sheet1');
-      
-      const filePath = path.join(process.cwd(), 'public', 'uploads', args.filePath);
-      XLSX.writeFile(workbook, filePath);
-      
+      XLSX.writeFile(workbook, args.filePath);
       return `Successfully wrote data to ${args.filePath}`;
     } catch (error) {
-      console.error('Error writing Excel file:', error);
-      throw new Error(`Failed to write Excel file: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return `Error writing Excel file: ${error instanceof Error ? error.message : 'Unknown error'}`;
     }
-  },
+  }
 };
 
 export const analyzeExcelTool: Tool = {
   name: 'analyze_excel',
-  description: 'Analyze data from an Excel or CSV file',
+  description: 'Analyze data from an Excel file and return insights',
   parameters: {
     type: 'object',
     properties: {
       filePath: {
         type: 'string',
-        description: 'Path to the Excel or CSV file relative to the workspace',
+        description: 'Path to the Excel file'
       },
-      operation: {
+      analysis: {
         type: 'string',
-        description: 'Type of analysis to perform (summary, filter, sort, aggregate)',
-      },
-      column: {
-        type: 'string',
-        description: 'Column name to analyze',
-      },
-      criteria: {
-        type: 'string',
-        description: 'Criteria for filtering or aggregation (optional)',
-      },
+        enum: ['summary', 'statistics', 'full'],
+        description: 'Type of analysis to perform'
+      }
     },
-    required: ['filePath', 'operation', 'column'],
+    required: ['filePath', 'analysis']
   },
   execute: async (args: Record<string, any>) => {
     try {
-      const filePath = path.join(process.cwd(), 'public', 'uploads', args.filePath);
-      const workbook = XLSX.readFile(filePath);
+      const workbook = XLSX.readFile(args.filePath);
       const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-      const data = XLSX.utils.sheet_to_json<ExcelRow>(worksheet);
+      const data = XLSX.utils.sheet_to_json(worksheet) as ExcelRow[];
 
-      switch (args.operation.toLowerCase()) {
-        case 'summary': {
-          const summary: Summary = {
-            count: data.length,
-            uniqueValues: new Set(data.map(row => row[args.column])).size,
-            hasNulls: data.some(row => row[args.column] == null),
-          };
-          return JSON.stringify(summary);
-        }
-
-        case 'filter': {
-          if (!args.criteria) throw new Error('Criteria required for filtering');
-          const filtered = data.filter(row => {
-            const value = row[args.column];
-            return value != null && String(value).toLowerCase().includes(args.criteria.toLowerCase());
+      switch (args.analysis) {
+        case 'summary':
+          return JSON.stringify({
+            rowCount: data.length,
+            columns: Object.keys(data[0] || {}),
+            sampleData: data.slice(0, 5)
           });
-          return JSON.stringify(filtered);
-        }
 
-        case 'sort': {
-          const sorted = [...data].sort((a, b) => {
-            const valueA = a[args.column];
-            const valueB = b[args.column];
-            
-            if (valueA == null) return 1;
-            if (valueB == null) return -1;
-            
-            if (typeof valueA === 'number' && typeof valueB === 'number') {
-              return valueA - valueB;
+        case 'statistics':
+          const stats: Record<string, any> = {};
+          Object.keys(data[0] || {}).forEach(col => {
+            if (typeof data[0][col] === 'number') {
+              const values = data.map(row => row[col]).filter(v => typeof v === 'number');
+              stats[col] = {
+                min: Math.min(...values),
+                max: Math.max(...values),
+                avg: values.reduce((a, b) => a + b, 0) / values.length
+              };
             }
-            
-            return String(valueA).localeCompare(String(valueB));
           });
-          return JSON.stringify(sorted);
-        }
+          return JSON.stringify(stats);
 
-        case 'aggregate': {
-          if (!args.criteria) throw new Error('Criteria required for aggregation');
-          const aggregated = data.reduce<AggregateResult>((acc, row) => {
-            const key = String(row[args.column] ?? 'Unknown');
-            const value = Number(row[args.criteria]) || 0;
-            acc[key] = (acc[key] || 0) + value;
-            return acc;
-          }, {});
-          return JSON.stringify(aggregated);
-        }
+        case 'full':
+          return JSON.stringify({
+            rowCount: data.length,
+            columns: Object.keys(data[0] || {}),
+            sampleData: data.slice(0, 5),
+            statistics: Object.keys(data[0] || {}).reduce((acc, col) => {
+              if (typeof data[0][col] === 'number') {
+                const values = data.map(row => row[col]).filter(v => typeof v === 'number');
+                acc[col] = {
+                  min: Math.min(...values),
+                  max: Math.max(...values),
+                  avg: values.reduce((a, b) => a + b, 0) / values.length
+                };
+              }
+              return acc;
+            }, {} as Record<string, any>)
+          });
 
         default:
-          throw new Error(`Unsupported operation: ${args.operation}`);
+          return 'Invalid analysis type';
       }
     } catch (error) {
-      console.error('Error analyzing Excel file:', error);
-      throw new Error(`Failed to analyze Excel file: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return `Error analyzing Excel file: ${error instanceof Error ? error.message : 'Unknown error'}`;
     }
-  },
+  }
 }; 
