@@ -9,32 +9,21 @@ interface ExcelRow {
 export const createExcelTools = (filePath: string): Tool[] => {
   return [
     {
-      name: 'read_excel_range',
-      description: 'Read a specific range from the Excel file',
+      name: 'read_excel_headers',
+      description: 'Get the column headers from the Excel file',
       parameters: {
         type: 'object',
-        properties: {
-          range: {
-            type: 'string',
-            description: 'The range to read (e.g., "A1:B10")'
-          },
-          sheet: {
-            type: 'string',
-            description: 'Sheet name (optional)'
-          }
-        },
-        required: ['range']
+        properties: {},
+        required: []
       },
-      execute: async (args: Record<string, any>) => {
+      execute: async () => {
         try {
           const workbook = XLSX.readFile(filePath);
-          const sheet = args.sheet || workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[sheet];
-          const range = XLSX.utils.decode_range(args.range);
-          const data = XLSX.utils.sheet_to_json(worksheet, { range });
+          const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+          const data = XLSX.utils.sheet_to_json(worksheet, { header: 1 })[0];
           return JSON.stringify(data);
         } catch (error) {
-          return `Error reading Excel range: ${error instanceof Error ? error.message : 'Unknown error'}`;
+          return `Error reading Excel headers: ${error instanceof Error ? error.message : 'Unknown error'}`;
         }
       }
     },

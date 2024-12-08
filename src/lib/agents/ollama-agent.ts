@@ -2,6 +2,14 @@ import { Agent, ChatMode, Message, StructuredOutputFormat } from './types';
 import { Tool } from '../tools/tool';
 import { DebugInfo } from '../../components/DebugPanel';
 
+interface ToolCall {
+  id: string;
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
 const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
 
 export interface OllamaAgentOptions {
@@ -56,17 +64,20 @@ export class OllamaAgent implements Agent {
   async chat(messages: Message[], format?: StructuredOutputFormat): Promise<string> {
     this.debug({ currentStep: 'Starting chat request' });
 
+    // Format messages for Ollama API
+    const formattedMessages = messages.map(msg => ({
+      role: msg.role,
+      content: msg.content
+    }));
+
     const payload: any = {
       model: this.model,
-      messages: messages.map(msg => ({
-        ...msg,
-        mode: msg.mode || this.currentMode
-      })),
+      messages: formattedMessages,
       stream: false,
     };
 
-    // Add tools if available and in tool-based mode
-    if (this.tools.length > 0 && this.currentMode === ChatMode.TOOL_BASED) {
+    // Only add tools and mode if in tool-based mode
+    if (this.currentMode === ChatMode.TOOL_BASED && this.tools.length > 0) {
       this.debug({ 
         currentStep: 'Adding tools to request',
         toolCalled: 'multiple',
@@ -81,16 +92,6 @@ export class OllamaAgent implements Agent {
           parameters: tool.parameters
         }
       }));
-    }
-
-    // Add structured output format if available and in structured mode
-    if ((format || this.structuredOutputFormat) && this.currentMode === ChatMode.STRUCTURED) {
-      const outputFormat = format || this.structuredOutputFormat;
-      this.debug({ 
-        currentStep: 'Adding structured output format',
-        toolArgs: outputFormat
-      });
-      payload.format = outputFormat;
     }
 
     try {
@@ -108,7 +109,8 @@ export class OllamaAgent implements Agent {
         const error = `Failed to chat with Ollama: ${response.statusText}`;
         this.debug({ 
           currentStep: 'Request failed',
-          error
+          error,
+          toolArgs: JSON.stringify(payload)
         });
         throw new Error(error);
       }
@@ -116,20 +118,41 @@ export class OllamaAgent implements Agent {
       const data = await response.json();
       
       // Handle tool calls if present and in tool-based mode
-      if (data.message?.tool_calls && this.currentMode === ChatMode.TOOL_BASED) {
-        for (const toolCall of data.message.tool_calls) {
+      if (this.currentMode === ChatMode.TOOL_BASED && data.message?.tool_calls) {
+        this.debug({ 
+          currentStep: 'Processing tool calls',
+          toolCalled: data.message.tool_calls.map((tc: ToolCall) => tc.function.name).join(', '),
+          toolArgs: data.message.tool_calls.map((tc: ToolCall) => tc.function.arguments)
+        });
+
+        for (const toolCall of data.message.tool_calls as ToolCall[]) {
           const tool = this.tools.find(t => t.name === toolCall.function.name);
           if (tool) {
+            let args: Record<string, any>;
+            try {
+              args = typeof toolCall.function.arguments === 'string' 
+                ? JSON.parse(toolCall.function.arguments)
+                : toolCall.function.arguments;
+            } catch (error) {
+              this.debug({ 
+                currentStep: 'Failed to parse tool arguments',
+                toolCalled: tool.name,
+                error: 'Invalid JSON in tool arguments',
+                toolArgs: toolCall.function.arguments
+              });
+              continue;
+            }
+
             this.debug({ 
-              currentStep: 'Executing tool',
+              currentStep: `Executing tool: ${tool.name}`,
               toolCalled: tool.name,
-              toolArgs: JSON.stringify(toolCall.function.arguments)
+              toolArgs: JSON.stringify(args)
             });
 
             try {
-              const result = await tool.execute(JSON.parse(toolCall.function.arguments));
+              const result = await tool.execute(args);
               this.debug({ 
-                currentStep: 'Tool execution completed',
+                currentStep: `Tool execution completed: ${tool.name}`,
                 toolCalled: tool.name,
                 toolResult: result
               });
@@ -142,7 +165,7 @@ export class OllamaAgent implements Agent {
               });
             } catch (error) {
               this.debug({ 
-                currentStep: 'Tool execution failed',
+                currentStep: `Tool execution failed: ${tool.name}`,
                 toolCalled: tool.name,
                 error: error instanceof Error ? error.message : 'Unknown error'
               });
