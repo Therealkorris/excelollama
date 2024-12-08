@@ -16,19 +16,16 @@ interface DebugPanelProps {
 export const DebugPanel: React.FC<DebugPanelProps> = ({ debugInfo }) => {
   const [isExpanded, setIsExpanded] = React.useState(false);
   const [history, setHistory] = useState<DebugInfo[]>([]);
-  const maxHistoryLength = 50; // Maximum number of history items to keep
+  const maxHistoryLength = 50;
 
   useEffect(() => {
-    // Add timestamp to debug info
     const timestampedInfo = {
       ...debugInfo,
       timestamp: new Date().toLocaleTimeString()
     };
     
-    // Add new debug info to history
     setHistory(prev => {
       const newHistory = [timestampedInfo, ...prev];
-      // Keep only the last maxHistoryLength items
       return newHistory.slice(0, maxHistoryLength);
     });
   }, [debugInfo]);
@@ -71,7 +68,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({ debugInfo }) => {
   );
 
   return (
-    <div className="fixed top-2 right-2 z-50">
+    <div className="fixed top-2 right-2 z-20">
       {/* Collapsed view */}
       {!isExpanded && (
         <button 
