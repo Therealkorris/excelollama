@@ -4,13 +4,15 @@ import { useEffect, useState, useCallback } from 'react';
 import { Resizable } from 're-resizable';
 import { ProcessManager } from '../components/ProcessManager';
 import { predefinedAgents } from '../lib/agents/predefined-agents';
-import { Agent } from '../lib/agents/types';
+import { Agent, ChatMode } from '../lib/agents/types';
 import { useAgentStore } from '../lib/store/agent-store';
 import { useDropzone } from 'react-dropzone';
 import * as XLSX from 'xlsx';
 import { Tool } from '../lib/tools/tool';
 import { functionCallingTool } from '../lib/tools/function-calling-tool';
 import { OllamaAgent, OllamaAgentOptions } from '../lib/agents/ollama-agent';
+import { DebugPanel, DebugInfo } from '../components/DebugPanel';
+import { ClearChatButton } from '../components/ClearChatButton';
 
 interface ExcelRow {
   [key: string]: string | number | boolean | null;
@@ -59,6 +61,12 @@ export default function Home() {
   const [currentWorkbook, setCurrentWorkbook] = useState<XLSX.WorkBook | null>(null);
   const [status, setStatus] = useState<'running' | 'stopped' | 'starting' | 'error'>('stopped');
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
+  const [debugInfo, setDebugInfo] = useState<DebugInfo>({ currentStep: 'Initializing' });
+
+  const handleDebug = useCallback((info: DebugInfo) => {
+    console.log('Debug info:', info); // For debugging
+    setDebugInfo(info);
+  }, []);
 
   const {
     messages,
@@ -66,12 +74,76 @@ export default function Home() {
     availableModels,
     selectedModel,
     addMessage,
+    clearMessages,
     setIsProcessing,
     setSelectedModel,
     loadFile,
     analyzeData,
     setAvailableModels,
   } = useAgentStore();
+
+  // Initialize agent when component mounts
+  useEffect(() => {
+    const initAgent = async () => {
+      try {
+        handleDebug({ currentStep: 'Fetching available models' });
+        const response = await fetch('/api/tags');
+        if (!response.ok) {
+          throw new Error('Failed to fetch available models');
+        }
+        const data = await response.json();
+        const modelNames = data.models.map((model: { name: string }) => model.name);
+        setAvailableModels(modelNames);
+        
+        if (modelNames.length > 0) {
+          const firstModel = modelNames[0];
+          handleDebug({ currentStep: `Initializing agent with model ${firstModel}` });
+          
+          // Initialize with Data Analyst agent
+          const dataAnalystAgent = predefinedAgents.find(a => a.id === 'data-analyst');
+          if (dataAnalystAgent) {
+            const agentOptions: OllamaAgentOptions = {
+              model: firstModel,
+              tools: dataAnalystAgent.tools,
+              onDebug: handleDebug,
+              supportedModes: [ChatMode.NORMAL, ChatMode.STRUCTURED, ChatMode.TOOL_BASED]
+            };
+            const agent = new OllamaAgent(agentOptions);
+            setSelectedAgent(agent);
+            setSelectedModel(firstModel);
+            handleDebug({ currentStep: 'Agent initialized successfully' });
+          }
+        }
+      } catch (error) {
+        console.error('Error initializing agent:', error);
+        handleDebug({ 
+          currentStep: 'Initialization failed', 
+          error: error instanceof Error ? error.message : 'Unknown error' 
+        });
+      }
+    };
+
+    initAgent();
+  }, [handleDebug, setAvailableModels, setSelectedModel]);
+
+  // Update agent when model changes
+  useEffect(() => {
+    if (selectedModel && selectedAgent) {
+      handleDebug({ currentStep: `Updating agent to use model ${selectedModel}` });
+      const dataAnalystAgent = predefinedAgents.find(a => a.id === 'data-analyst');
+      if (dataAnalystAgent) {
+        const agentOptions: OllamaAgentOptions = {
+          model: selectedModel,
+          tools: dataAnalystAgent.tools,
+          onDebug: handleDebug,
+          supportedModes: [ChatMode.NORMAL, ChatMode.STRUCTURED, ChatMode.TOOL_BASED]
+        };
+        const agent = new OllamaAgent(agentOptions);
+        setSelectedAgent(agent);
+        handleDebug({ currentStep: 'Agent updated successfully' });
+      }
+    }
+  }, [selectedModel, handleDebug]);
 
   const handleStatusChange = useCallback((newStatus: 'running' | 'stopped' | 'starting' | 'error') => {
     setStatus(newStatus);
@@ -80,69 +152,44 @@ export default function Home() {
     }
   }, [setIsProcessing]);
 
-  const initializeAgent = useCallback(async () => {
-    try {
-      const response = await fetch('/api/models');
-      if (!response.ok) {
-        throw new Error('Failed to fetch available models');
-      }
-      const models = await response.json();
-      setAvailableModels(models);
-      if (models.length > 0) {
-        setSelectedModel(models[0]); // Select the first model by default
-      }
-    } catch (error) {
-      console.error(error);
-    }
-  }, [setAvailableModels, setSelectedModel]);
-
-  useEffect(() => {
-    initializeAgent();
-  }, [initializeAgent]);
-
-  // Initialize Ollama agent when selectedModel changes
-  useEffect(() => {
-    if (selectedModel) {
-      const initializeOllamaAgent = async () => {
-        const tools: Tool[] = [
-          functionCallingTool,
-        ];
-
-        const options: OllamaAgentOptions = {
-          model: selectedModel,
-          tools: tools,
-        };
-
-        const ollamaAgent = new OllamaAgent(options);
-
-        // @ts-ignore
-        window.ollamaAgent = ollamaAgent;
-      };
-
-      initializeOllamaAgent();
-    }
-  }, [selectedModel]);
-
+  // Handle file upload with debug info
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     if (acceptedFiles?.length > 0) {
       const file = acceptedFiles[0];
       try {
+        handleDebug({ currentStep: `Processing file: ${file.name}` });
+        
         // Read the file locally for preview
         const reader = new FileReader();
         reader.onload = (e) => {
+          handleDebug({ currentStep: 'Loading file preview' });
           const data = new Uint8Array(e.target?.result as ArrayBuffer);
           const workbook = XLSX.read(data, { type: 'array' });
           setCurrentWorkbook(workbook);
+          handleDebug({ currentStep: 'File preview loaded successfully' });
         };
         reader.readAsArrayBuffer(file);
 
-        // Send to backend
+        // Send to backend and initialize tools
+        handleDebug({ currentStep: 'Uploading file to server' });
         await loadFile(file);
+        
+        // Set mode to tool-based after file upload
+        if (selectedAgent instanceof OllamaAgent) {
+          selectedAgent.setMode(ChatMode.TOOL_BASED);
+          handleDebug({ currentStep: 'Switched to tool-based mode' });
+        }
+        
+        handleDebug({ currentStep: 'File uploaded successfully' });
       } catch (error) {
         console.error('Error loading file:', error);
+        handleDebug({ 
+          currentStep: 'File processing failed',
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
       }
     }
-  }, [loadFile]);
+  }, [loadFile, handleDebug, selectedAgent]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -155,6 +202,7 @@ export default function Home() {
 
   return (
     <main className="flex h-screen bg-gray-100">
+      <DebugPanel debugInfo={debugInfo} />
       {/* Left Sidebar */}
       <div className="w-64 bg-white shadow-sm overflow-y-auto border-r border-gray-200">
         {/* Backend Status Section */}
@@ -272,7 +320,10 @@ export default function Home() {
               }
             `}</style>
             <div className="h-full flex flex-col">
-              <h3 className="text-lg font-medium p-4 border-b bg-gray-50 text-gray-800">Excel Preview</h3>
+              <div className="flex justify-between items-center p-4 border-b bg-gray-50">
+                <h3 className="text-lg font-medium text-gray-800">Excel Preview</h3>
+                <ClearChatButton onClick={clearMessages} />
+              </div>
               <div className="flex-1 overflow-auto relative">
                 <div className="absolute inset-0">
                   <ExcelPreview workbook={currentWorkbook} />
@@ -315,7 +366,7 @@ export default function Home() {
                     if (e.key === 'Enter' && !isProcessing) {
                       const input = e.target as HTMLInputElement;
                       if (input.value.trim()) {
-                        analyzeData(input.value);
+                        analyzeData(input.value, undefined, handleDebug);
                         input.value = '';
                       }
                     }
@@ -327,7 +378,7 @@ export default function Home() {
                   onClick={() => {
                     const input = document.querySelector('#chat-input') as HTMLInputElement;
                     if (input?.value.trim()) {
-                      analyzeData(input.value);
+                      analyzeData(input.value, undefined, handleDebug);
                       input.value = '';
                     }
                   }}

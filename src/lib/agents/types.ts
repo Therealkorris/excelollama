@@ -10,6 +10,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
   tool_call_id?: string;
+  mode?: ChatMode;
 }
 
 export interface StructuredOutputFormat {
@@ -26,5 +27,6 @@ export interface Agent {
   model: string;
   supportedModes: ChatMode[];
   structuredOutputFormat?: StructuredOutputFormat;
-  chat(messages: Message[]): Promise<string>;
+  setMode?: (mode: ChatMode) => void;
+  chat(messages: Message[], format?: StructuredOutputFormat): Promise<string>;
 }
