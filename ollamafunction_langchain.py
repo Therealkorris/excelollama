@@ -10,23 +10,35 @@ import pandas as pd
 import ollama
 import requests
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any, TypedDict, Literal
+from typing import List, Optional, Dict, Any, TypedDict
+from langgraph.graph import Graph, StateGraph
+from langgraph.prebuilt import ToolExecutor
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_core.messages.base import BaseMessage
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 CHUNK_SIZE = 2000  # Characters per chunk
 CHUNK_OVERLAP = 200  # Overlap between chunks
 
+class ProcessingState(TypedDict):
+    messages: List[Dict[str, str]]
+    current_chunk: str
+    chunks_processed: int
+    total_chunks: int
+    extracted_valves: List[Dict[str, Any]]
+
 class ValveSpecification(BaseModel):
-    valve_type: str = Field(description="Type of the valve (e.g., ball valve, gate valve, etc.)")
-    serial_id: str = Field(description="Unique identifier for the valve")
-    width: Optional[float] = Field(None, description="Width of the valve in millimeters")
-    height: Optional[float] = Field(None, description="Height of the valve in millimeters")
-    pressure_rating: Optional[str] = Field(None, description="Pressure rating of the valve")
-    material: Optional[str] = Field(None, description="Material of the valve construction")
-    manufacturer: Optional[str] = Field(None, description="Manufacturer of the valve")
+    valve_type: str
+    serial_id: str
+    width: float | None
+    height: float | None
+    pressure_rating: str | None
+    material: str | None
+    manufacturer: str | None
 
 class ValveList(BaseModel):
-    valves: List[ValveSpecification] = Field(description="List of valve specifications extracted from the text")
+    valves: List[ValveSpecification]
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -41,6 +53,9 @@ class MainWindow(QMainWindow):
             chunk_overlap=CHUNK_OVERLAP,
             length_function=len,
         )
+        
+        # Setup the graph for processing
+        self.setup_processing_graph()
         
         # Main widget and layout
         main_widget = QWidget()
@@ -135,36 +150,51 @@ class MainWindow(QMainWindow):
         # Initialize
         self.refresh_models()
     
-    def process_chunk(self, chunk: str, model: str) -> List[ValveSpecification]:
-        """Process a single chunk of text using Ollama's structured output"""
-        try:
-            # Create the prompt with clear instructions
-            prompt = f"""Extract valve specifications from the following text. Return the data in a structured format.
-            Focus on identifying valve types, serial numbers, dimensions, pressure ratings, materials, and manufacturers.
-            
-            Text to analyze:
-            {chunk}
-            
-            Return as JSON matching the specified schema."""
-            
-            # Make the API call with structured output format
-            response = ollama.chat(
-                messages=[{
-                    'role': 'user',
-                    'content': prompt,
-                }],
-                model=model,
-                format=ValveList.model_json_schema(),
-                options={'temperature': 0}  # More deterministic output
-            )
-            
-            # Parse and validate the response
-            result = ValveList.model_validate_json(response.message.content)
-            return result.valves
-            
-        except Exception as e:
-            self.chat_text.append(f"Error processing chunk: {str(e)}")
-            return []
+    def setup_processing_graph(self):
+        """Setup the LangGraph processing workflow"""
+        def process_chunk(state: ProcessingState) -> ProcessingState:
+            try:
+                messages = [
+                    {"role": "system", "content": "You are a valve specification analyzer. Extract structured information about valves from the text."},
+                    *state["messages"],
+                    {"role": "user", "content": f"Extract valve specifications from this text: {state['current_chunk']}"}
+                ]
+                
+                response = ollama.chat(
+                    messages=messages,
+                    model=self.model_combo.currentText(),
+                    format=ValveList.model_json_schema(),
+                )
+                
+                # Add to conversation history
+                state["messages"].append({"role": "user", "content": state["current_chunk"]})
+                state["messages"].append({"role": "assistant", "content": response.message.content})
+                state["chunks_processed"] += 1
+                
+                # Parse and store valves
+                try:
+                    valves = ValveList.model_validate_json(response.message.content)
+                    state["extracted_valves"].extend([v.model_dump() for v in valves.valves])
+                except Exception as e:
+                    self.chat_text.append(f"Error parsing valve data: {str(e)}")
+                
+                return state
+                
+            except Exception as e:
+                self.chat_text.append(f"Error processing chunk: {str(e)}")
+                return state
+        
+        # Create the graph with state schema
+        workflow = StateGraph(ProcessingState)
+        
+        # Add the processing node
+        workflow.add_node("process_chunk", process_chunk)
+        
+        # Set the entry point
+        workflow.set_entry_point("process_chunk")
+        
+        # Compile the graph
+        self.graph = workflow.compile()
     
     def process_text(self):
         """Process the input text or Excel data with chunking"""
@@ -185,8 +215,7 @@ class MainWindow(QMainWindow):
             chunks = self.text_splitter.split_text(input_text)
             
             # Update chat area
-            model = self.model_combo.currentText()
-            self.chat_text.append(f"\nProcessing with model: {model}")
+            self.chat_text.append(f"\nProcessing with model: {self.model_combo.currentText()}")
             self.chat_text.append(f"Split into {len(chunks)} chunks")
             
             # Show progress bar
@@ -194,28 +223,42 @@ class MainWindow(QMainWindow):
             self.progress_bar.setMaximum(len(chunks))
             self.progress_bar.setValue(0)
             
-            # Process chunks
-            all_valves = []
+            # Initialize state for processing
+            initial_state: ProcessingState = {
+                "messages": [],
+                "current_chunk": "",
+                "chunks_processed": 0,
+                "total_chunks": len(chunks),
+                "extracted_valves": []
+            }
+            
+            # Process chunks using the graph
             seen_serials = set()
+            state = initial_state
             
             for i, chunk in enumerate(chunks):
                 self.chat_text.append(f"\nProcessing chunk {i+1}/{len(chunks)}...")
                 
-                # Process chunk
-                chunk_valves = self.process_chunk(chunk, model)
+                # Update state
+                state["current_chunk"] = chunk
                 
-                # Add unique valves
-                for valve in chunk_valves:
-                    if valve.serial_id not in seen_serials:
-                        all_valves.append(valve)
-                        seen_serials.add(valve.serial_id)
+                # Run the graph
+                result_state = self.graph.invoke(state)
+                state = result_state  # Update state for next iteration
                 
                 # Update progress
                 self.progress_bar.setValue(i + 1)
                 QApplication.processEvents()
             
+            # Deduplicate valves based on serial_id
+            unique_valves = []
+            for valve in state["extracted_valves"]:
+                if valve["serial_id"] not in seen_serials:
+                    unique_valves.append(valve)
+                    seen_serials.add(valve["serial_id"])
+            
             # Format final output
-            final_result = {"valves": [v.model_dump() for v in all_valves]}
+            final_result = {"valves": unique_valves}
             formatted_output = json.dumps(final_result, indent=2)
             self.output_text.setText(formatted_output)
             
@@ -230,7 +273,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", error_msg)
     
     def clear_all(self):
-        """Clear all areas"""
+        """Clear all areas and reset state"""
         self.input_text.clear()
         self.tree_widget.clear()
         self.output_text.clear()
